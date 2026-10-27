@@ -1,0 +1,185 @@
+"""End-to-end through the CLI with a fake `hid` module standing in for the controller."""
+
+import sys
+import threading
+import types
+
+import numpy as np
+import pytest
+
+from ledctl import protocol as P
+
+
+class FakeDev:
+    def __init__(self):
+        self.writes, self.pending = [], []
+
+    def open_path(self, path):
+        assert path == b"fake-path"
+
+    def set_nonblocking(self, v):
+        pass
+
+    def write(self, rep):
+        assert len(rep) == 65 and rep[0] == 0
+        self.writes.append(bytes(rep))
+        data = bytes(rep[1:])
+        if data[:2] == b"RB" and data[4] == P.DEVICE_INFO:
+            r = bytearray(64)
+            r[:5] = b"RB\x18" + bytes([data[3], 0x82])
+            r[11], r[21:24] = 54, b"\x01\x09\x04"
+            self.pending.append(list(r))
+        return len(rep)
+
+    def read(self, n):
+        return self.pending.pop(0) if self.pending else []
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def fake(monkeypatch, tmp_path):
+    dev = FakeDev()
+    mod = types.SimpleNamespace(
+        device=lambda: dev,
+        enumerate=lambda vid, pid: [{"path": b"fake-path", "usage_page": 0xFF00, "vendor_id": vid,
+                                     "product_id": pid, "interface_number": 0}] if pid == 0xFE07 else [])
+    monkeypatch.setitem(sys.modules, "hid", mod)
+    from ledctl import cli
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "config.json")
+    return dev
+
+
+def frames(dev):
+    return [w[1:] for w in dev.writes]
+
+
+def test_color(fake):
+    from ledctl.cli import main
+    assert main(["color", "#FF8000"]) == 0
+    f = frames(fake)
+    assert f[0][4] == 0x82 and f[1][4] == 0x93 and f[2][4] == 0x86
+    assert f[2][5:15] == bytes([1, 255, 128, 0, 54, 55, 0, 0, 0, 254])
+
+
+def test_brightness_resends_colour(fake):
+    from ledctl.cli import main
+    main(["brightness", "100"])
+    acts = [f[4] for f in frames(fake)]
+    assert acts[-2:] == [0x87, 0x86]
+
+
+def test_keep_keyboard(fake):
+    from ledctl.cli import main
+    main(["--keep-keyboard", "off"])
+    assert [f[4] for f in frames(fake)] == [0x82, 0x97]
+
+
+def test_sync_loop(fake, monkeypatch):
+    from ledctl import cli, screen
+
+    class FakeCap:
+        backend = "fake"
+
+        def __init__(self, *a, **k):
+            pass
+
+        def grab(self):
+            img = np.zeros((90, 160, 3), np.uint8)
+            img[:, :16] = (255, 0, 0)
+            return img
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(screen, "Capture", FakeCap)
+    stop = threading.Event()
+    args = cli.build_parser().parse_args(["sync"])
+    cfg = cli.load_config()
+    cfg["fps"] = 200
+    t = threading.Thread(target=cli.run_sync, args=(args, cfg, stop))
+    t.start()
+    threading.Timer(0.3, stop.set).start()
+    t.join(3)
+    sc = [f for f in frames(fake) if f[:2] == b"SC"]
+    assert 1 <= len(sc) <= 3  # static picture: sent once (+ keepalive), not 30x/s
+    # all-red left side + black elsewhere collapses into a single-report frame
+    assert int.from_bytes(sc[0][2:4], "big") <= 64
+    assert sc[0][6:10] == bytes([1, 255, 0, 0]) and sc[0][10] >= 18  # left side (+ corner) red
+    assert frames(fake)[-1][4] == 0x86  # back to saved colour on exit
+
+
+def test_capture_falls_back_when_dxcam_breaks(monkeypatch):
+    import types as T
+    from ledctl import screen
+
+    class BrokenCam:
+        def grab(self, **kw):
+            raise ModuleNotFoundError("No module named 'cv2'")
+
+        def release(self):
+            pass
+
+    calls = {}
+
+    def create(**kw):
+        calls.update(kw)
+        return BrokenCam()
+
+    monkeypatch.setitem(sys.modules, "dxcam", T.SimpleNamespace(create=create))
+
+    class FakeMss:
+        monitors = [None, {"left": 0, "top": 0, "width": 4, "height": 2}]
+
+        def grab(self, mon):
+            return np.zeros((2, 4, 4), np.uint8)
+
+    monkeypatch.setitem(sys.modules, "mss", T.SimpleNamespace(mss=FakeMss))
+    cap = screen.Capture(backend="auto")
+    assert calls["output_color"] == "BGRA"
+    assert cap.backend == "mss" and cap.grab().shape == (2, 4, 3)
+
+
+def test_dxcam_bgra_converted(monkeypatch):
+    import types as T
+    from ledctl import screen
+    frame = np.zeros((4, 8, 4), np.uint8)
+    frame[..., 0] = 200  # B
+    frame[..., 2] = 10   # R
+    cam = T.SimpleNamespace(grab=lambda **k: frame, release=lambda: None)
+    monkeypatch.setitem(sys.modules, "dxcam", T.SimpleNamespace(create=lambda **k: cam))
+    cap = screen.Capture(backend="auto")
+    img = cap.grab()
+    assert cap.backend == "dxcam" and tuple(img[0, 0]) == (10, 0, 200)
+
+
+def test_autostart_registry(monkeypatch, capsys):
+    import types as T
+    from ledctl import cli
+    store = {}
+
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def delete(k, name):
+        if name not in store:
+            raise FileNotFoundError
+        del store[name]
+
+    fake = T.SimpleNamespace(
+        HKEY_CURRENT_USER=1, KEY_SET_VALUE=2, KEY_QUERY_VALUE=4, REG_SZ=1,
+        OpenKey=lambda *a: Key(), SetValueEx=lambda k, n, r, t, v: store.__setitem__(n, v),
+        QueryValueEx=lambda k, n: (store[n], 1) if n in store else (_ for _ in ()).throw(FileNotFoundError()),
+        DeleteValue=delete)
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    cli.main(["autostart", "sync"])
+    assert store["ledctl"].endswith('ledctl_tray.pyw" --sync') and "pythonw" in store["ledctl"]
+    cli.main(["autostart", "color"])
+    assert not store["ledctl"].endswith("--sync")
+    cli.main(["autostart", "off"])
+    assert store == {}

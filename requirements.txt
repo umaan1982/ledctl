@@ -1,0 +1,7 @@
+hidapi>=0.14
+numpy>=1.24
+mss>=9.0
+pystray>=0.19
+pillow>=10.0
+# Optional, faster DXGI capture on Windows (falls back to mss without it):
+# dxcam>=0.0.5
