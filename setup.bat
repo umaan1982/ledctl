@@ -4,6 +4,6 @@ cd /d "%~dp0"
 python -m venv .venv || (echo Install Python 3.10+ from python.org first & exit /b 1)
 .venv\Scripts\python -m pip install --upgrade pip
 .venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python -m pip install dxcam
+.venv\Scripts\python -m pip install dxcam==0.3.0 comtypes==1.4.17
 echo.
 echo Done. Close DX Light, plug in the strip, then run:  ledctl info

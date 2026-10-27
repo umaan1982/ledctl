@@ -61,6 +61,7 @@ without touching USB.
 - `ledctl/screen.py`: capture (dxcam/DXGI with mss fallback), LED layout, summed-area-table sampling
 - `ledctl/cli.py`, `ledctl/tray.py`, `ledctl_tray.pyw`: front ends
 - [`PROTOCOL.md`](PROTOCOL.md): the USB protocol
+- [`AUDIT.md`](AUDIT.md): audit of the pinned dependencies
 - `tests/`: `python -m pytest` (protocol vectors, simulated device, capture fallback)
 
 ## Credits

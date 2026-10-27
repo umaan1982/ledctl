@@ -1,7 +1,8 @@
-hidapi>=0.14
-numpy>=1.24
-mss>=9.0
-pystray>=0.19
-pillow>=10.0
-# Optional, faster DXGI capture on Windows (falls back to mss without it):
-# dxcam>=0.0.5
+# Pinned to the exact versions audited on 2026-10-27 (see AUDIT.md).
+# PyPI never lets a published version's files be replaced, so a pin = fixed, audited content.
+hidapi==0.15.0
+numpy==2.5.4
+mss==10.2.0
+pystray==0.19.5
+pillow==13.0.0
+six==1.17.0
