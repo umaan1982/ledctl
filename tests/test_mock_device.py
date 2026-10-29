@@ -1,6 +1,7 @@
 """End-to-end through the CLI with a fake `hid` module standing in for the controller."""
 
 import sys
+from pathlib import Path
 import threading
 import types
 
@@ -183,3 +184,38 @@ def test_autostart_registry(monkeypatch, capsys):
     assert not store["ledctl"].endswith("--sync")
     cli.main(["autostart", "off"])
     assert store == {}
+
+
+def _hold_lock_in_other_process():
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r); from ledctl import instance; "
+            "instance.acquire(); print('locked', flush=True); sys.stdin.read()") % str(Path(__file__).parents[1])
+    p = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "locked"
+    return p
+
+
+def test_single_instance_lock(fake, capsys):
+    from ledctl import cli
+    p = _hold_lock_in_other_process()  # pretend the tray app is running
+    try:
+        assert cli.main(["sync"]) == 2
+        assert "already running" in capsys.readouterr().err
+        assert cli.main(["color", "#00FF00"]) == 0  # one-shot still works, with a note
+        assert "tray app is running" in capsys.readouterr().err
+    finally:
+        p.stdin.close(); p.wait(5)
+
+
+def test_lock_blocks_second_process(tmp_path):
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r); from ledctl import instance; "
+            "instance.acquire(); print('locked', flush=True); sys.stdin.read()") % str(Path(__file__).parents[1])
+    p = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "locked"
+        from ledctl import instance
+        assert instance.other_running()
+    finally:
+        p.stdin.close(); p.wait(5)
+    assert not instance.other_running()

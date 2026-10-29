@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import instance
 from . import protocol as P
 from .device import DeviceError, Strip, list_interfaces
 
@@ -303,13 +304,58 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+STRIP_CMDS = {"info", "color", "brightness", "off", "effect", "calibrate", "sync", "tray"}
+OWNER_CMDS = {"sync", "tray"}  # long-running: only one may drive the strip
+BUSY_MSG = ("ledctl is already running (tray icon or another sync window).\n"
+            "Quit it first: right-click the tray icon -> Quit, or Ctrl+C in the other window.")
+
+
+def _popup(msg: str) -> None:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, msg, "ledctl", 0x40)
+        except Exception:
+            pass
+
+
+def preflight(args) -> bool:
+    """Single-instance lock for sync/tray, warnings for everything else."""
+    if args.cmd not in STRIP_CMDS or args.dry_run:
+        return True
+    vendor = instance.vendor_running()
+    if vendor:
+        msg = (f"Warning: {vendor} (the vendor app) is running and will fight ledctl over the lights. "
+               "Close it, and disable it in Task Manager -> Startup apps.")
+        print(msg, file=sys.stderr)
+        if args.cmd == "tray":
+            _popup(msg)
+    if args.cmd in OWNER_CMDS:
+        try:
+            instance.acquire()
+        except instance.AlreadyRunning:
+            print(f"Error: {BUSY_MSG}", file=sys.stderr)
+            if args.cmd == "tray":
+                _popup(BUSY_MSG)
+            return False
+    elif instance.other_running():
+        print("Note: the ledctl tray app is running. If it's syncing, it will overwrite this; "
+              "use its menu instead, or Quit it first.", file=sys.stderr)
+    return True
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if not preflight(args):
+        return 2
     try:
         args.fn(args, load_config())
     except DeviceError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+    finally:
+        if args.cmd in OWNER_CMDS:
+            instance.release()
     return 0
 
 

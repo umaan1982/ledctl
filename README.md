@@ -38,6 +38,8 @@ Device Manager → Human Interface Devices → Properties → Details → **Hard
 | Off | `ledctl off` |
 
 The tray menu has screen sync on/off, colour presets, brightness, Off and Quit.
+Only one copy can run sync or the tray at a time; a second copy refuses to start and tells you why.
+ledctl also warns you if the DX Light / SyncLight app is running, because both would fight over the lights.
 If the tray app hits an error, it's logged to `%APPDATA%\ledctl\ledctl.log`.
 
 ## Tuning screen sync
@@ -59,6 +61,7 @@ without touching USB.
 - `ledctl/protocol.py`: frame building (pure functions, unit-tested)
 - `ledctl/device.py`: the only code that touches USB (hidapi)
 - `ledctl/screen.py`: capture (dxcam/DXGI with mss fallback), LED layout, summed-area-table sampling
+- `ledctl/instance.py`: single-instance lock, vendor-app detection
 - `ledctl/cli.py`, `ledctl/tray.py`, `ledctl_tray.pyw`: front ends
 - [`PROTOCOL.md`](PROTOCOL.md): the USB protocol
 - [`AUDIT.md`](AUDIT.md): audit of the pinned dependencies
