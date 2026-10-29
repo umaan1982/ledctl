@@ -244,3 +244,87 @@ def test_snapshot(monkeypatch, tmp_path, capsys):
     assert cli.main(["snapshot", "--out", str(out)]) == 0
     txt = capsys.readouterr().out
     assert out.exists() and "top" in txt and "left" in txt
+
+
+class SilentDev(FakeDev):
+    """A controller that never answers the info request (seen right after Windows login)."""
+
+    def write(self, rep):
+        self.writes.append(bytes(rep))
+        return len(rep)
+
+
+def _install(monkeypatch, dev):
+    mod = types.SimpleNamespace(
+        device=lambda: dev,
+        enumerate=lambda vid, pid: [{"path": b"fake-path", "usage_page": 0xFF00}] if pid == 0xFE07 else [])
+    monkeypatch.setitem(sys.modules, "hid", mod)
+
+
+def test_led_count_remembered_when_info_fails(monkeypatch, tmp_path, capsys):
+    from ledctl import cli
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "c.json")
+    good = FakeDev()  # first run: strip answers 54... pretend it's an 80-LED bar
+    orig = good.write
+
+    def write80(rep):
+        n = orig(rep)
+        if good.pending:
+            good.pending[-1][11] = 80
+        return n
+    good.write = write80
+    _install(monkeypatch, good)
+    cli.main(["info"])
+    assert cli.load_config()["led_count"] == 80
+    silent = SilentDev()
+    _install(monkeypatch, silent)
+    s = cli.open_strip(cli.build_parser().parse_args(["off"]))
+    assert s.led_count == 80  # not the old silent fallback of 54
+    assert "remembered 80" in capsys.readouterr().err
+    assert sum(1 for w in silent.writes if w[1:3] == b"RB" and w[5] == 0x82) == 3  # retried
+
+
+def test_info_reply_found_after_unrelated_report(monkeypatch, tmp_path):
+    from ledctl import cli
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "c.json")
+    dev = FakeDev()
+    dev.pending.append(list(b"RB\x07\x09\x87\x01\x00" + bytes(57)))  # stale brightness ack
+    _install(monkeypatch, dev)
+    s = cli.open_strip(cli.build_parser().parse_args(["off"]))
+    assert s.led_count == 54 and s.info.firmware == (1, 9, 4)
+
+
+def test_sync_survives_capture_failure(fake, monkeypatch):
+    from ledctl import cli, screen
+    monkeypatch.setattr(cli, "RETRY_S", 0.01)
+    calls = {"open": 0, "grab": 0}
+
+    class FlakyCap:
+        backend = "fake"
+
+        def __init__(self, *a, **k):
+            calls["open"] += 1
+            if calls["open"] == 1:
+                raise OSError("Access is denied")  # login screen
+
+        def grab(self):
+            calls["grab"] += 1
+            if calls["grab"] == 2:
+                raise OSError("BitBlt failed")      # lock screen
+            img = np.zeros((90, 160, 3), np.uint8)
+            img[:, :, 0] = calls["grab"] % 200      # keep changing so frames are sent
+            return img
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(screen, "Capture", FlakyCap)
+    stop = threading.Event()
+    cfg = cli.load_config()
+    cfg["fps"] = 200
+    t = threading.Thread(target=cli.run_sync, args=(cli.build_parser().parse_args(["sync"]), cfg, stop))
+    t.start()
+    threading.Timer(0.4, stop.set).start()
+    t.join(3)
+    assert calls["open"] >= 3 and calls["grab"] > 5
+    assert sum(1 for f in frames(fake) if f[:2] == b"SC") > 3

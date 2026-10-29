@@ -47,13 +47,27 @@ def parse_color(vals: list[str]) -> tuple[int, int, int]:
 
 
 def open_strip(args) -> Strip:
+    """Open the strip and settle its LED count: --leds, else what the strip reports
+    (remembered in the config), else the remembered count. Never guess silently."""
     log = (lambda f: print("TX", f.hex(" "))) if args.verbose or args.dry_run else None
     s = Strip(dry_run=args.dry_run, log=log)
     info = s.handshake(disable_keyboard=not args.keep_keyboard)
-    if args.dry_run and info is None:
-        s.info = P.DeviceInfo(args.leds or 54, (1, 9, 4), "DRYRUN", b"")
-    elif args.leds:
-        s.info = P.DeviceInfo(args.leds, info.firmware if info else (0, 0, 0), "", b"")
+    cfg = load_config()
+    if info and info.led_count:
+        if cfg.get("led_count") != info.led_count:
+            cfg["led_count"] = info.led_count
+            save_config(cfg)
+    count = args.leds or (info.led_count if info and info.led_count else 0) or cfg.get("led_count") or 0
+    if not count:
+        count = 54 if args.dry_run else 80
+        if not args.dry_run:
+            print(f"Warning: the strip didn't report its LED count; assuming {count}. "
+                  "Run `ledctl info` once, or pass --leds N.", file=sys.stderr)
+    elif not info and not args.dry_run:
+        print(f"Note: the strip didn't answer the info request; using the remembered {count} LEDs.",
+              file=sys.stderr)
+    fw = info.firmware if info else (1, 9, 4) if args.dry_run else (0, 0, 0)
+    s.info = P.DeviceInfo(count, fw, info.model if info else "", info.raw if info else b"")
     return s
 
 
@@ -124,7 +138,7 @@ def cmd_snapshot(args, cfg):
     import numpy as np
     from PIL import Image, ImageDraw
     from .screen import Capture, Processor, Sampler
-    n = args.leds or 80
+    n = args.leds or cfg.get("led_count") or 80
     lay = make_layout(cfg, n)
     sampler = Sampler(lay, cfg["depth"])
     cap = Capture(cfg["monitor"], backend=cfg["backend"])
@@ -172,7 +186,7 @@ def cmd_snapshot(args, cfg):
 
 def cmd_calibrate(args, cfg):
     s = open_strip(args)
-    n = s.led_count or 54
+    n = s.led_count or 80
     lay = make_layout(cfg, n)
     colors = []
     side_rgb = {"left": (255, 0, 0), "top": (0, 255, 0), "right": (0, 0, 255), "bottom": (255, 0, 255)}
@@ -204,14 +218,32 @@ def cmd_config(args, cfg):
     print(f"{CONFIG}\n{json.dumps(cfg, indent=2)}")
 
 
+RETRY_S = 2.0
+
+
+def _open_capture(cfg, stop: threading.Event):
+    """Open screen capture, retrying every 2 s until it works or we're stopped
+    (capture is denied on the login/lock screen, e.g. right after autostart)."""
+    from .screen import Capture
+    while not stop.is_set():
+        try:
+            return Capture(cfg["monitor"], backend=cfg["backend"])
+        except Exception as e:
+            print(f"Screen capture not available yet ({type(e).__name__}: {e}); retrying in 2 s.")
+            stop.wait(RETRY_S)
+    return None
+
+
 def run_sync(args, cfg, stop: threading.Event, strip: Strip | None = None):
-    from .screen import Capture, Processor, Sampler
+    from .screen import Processor, Sampler
     s = strip or open_strip(args)
-    n = s.led_count or 54
+    n = s.led_count or 80
     lay = make_layout(cfg, n)
     sampler = Sampler(lay, cfg["depth"])
     proc = Processor(cfg["smoothing"], cfg["saturation"], cfg["gamma"])
-    cap = Capture(cfg["monitor"], backend=cfg["backend"])
+    cap = _open_capture(cfg, stop)
+    if cap is None:
+        return
     s.solid(tuple(cfg["color"]))  # wake the strip in case it was switched off
     if cfg.get("brightness"):
         s.brightness(cfg["brightness"])
@@ -225,7 +257,18 @@ def run_sync(args, cfg, stop: threading.Event, strip: Strip | None = None):
     try:
         while not stop.is_set():
             t0 = time.monotonic()
-            img = cap.grab()
+            try:
+                img = cap.grab()
+            except Exception as e:  # lock screen, login, UAC prompt, display change...
+                print(f"Screen capture failed ({type(e).__name__}: {e}); retrying in 2 s.")
+                cap.close()
+                cap = None
+                if stop.wait(RETRY_S):
+                    break
+                cap = _open_capture(cfg, stop)
+                if cap is None:
+                    break
+                continue
             if img is not None:
                 cols = [tuple(c) for c in proc(sampler.sample(img)).astype(int).tolist()]
                 frames += 1
@@ -242,7 +285,8 @@ def run_sync(args, cfg, stop: threading.Event, strip: Strip | None = None):
                 frames, sent, t_stat, cpu_stat = 0, 0, time.monotonic(), time.process_time()
             stop.wait(max(0.0, period - (time.monotonic() - t0)))
     finally:
-        cap.close()
+        if cap is not None:
+            cap.close()
         if strip is None:
             s.solid(tuple(cfg["color"]))  # back to your saved colour
             s.close()

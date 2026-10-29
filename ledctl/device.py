@@ -74,13 +74,33 @@ class Strip:
                 time.sleep(0.005)
         return buf
 
+    def _read_info(self, timeout: float = 1.0) -> P.DeviceInfo | None:
+        """Read reports until one is a device-info reply (skips unrelated reports)."""
+        if self.dry_run:
+            return None
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            r = self._dev.read(P.REPORT_SIZE)
+            if r:
+                info = P.parse_device_info(bytes(r))
+                if info:
+                    return info
+            else:
+                time.sleep(0.005)
+        return None
+
     # -- commands -----------------------------------------------------------
     def handshake(self, disable_keyboard: bool = True) -> P.DeviceInfo | None:
         if not self.dry_run:
             while self._dev.read(P.REPORT_SIZE):  # drop stale replies
                 pass
-        self.send(P.cmd_device_info(self.seq()))
-        self.info = P.parse_device_info(self._read())
+        self.info = None
+        for _ in range(3):  # the controller sometimes misses the first request (e.g. right after login)
+            self.send(P.cmd_device_info(self.seq()))
+            self.info = self._read_info()
+            if self.info or self.dry_run:
+                break
+            time.sleep(0.3)
         if disable_keyboard:
             # Stops the controller from acting as a keyboard that opens the vendor URL.
             self.send(P.cmd_disable_keyboard_url(self.seq()))
