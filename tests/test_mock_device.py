@@ -219,3 +219,28 @@ def test_lock_blocks_second_process(tmp_path):
     finally:
         p.stdin.close(); p.wait(5)
     assert not instance.other_running()
+
+
+def test_snapshot(monkeypatch, tmp_path, capsys):
+    from ledctl import cli, screen
+
+    class FakeCap:
+        backend = "fake"
+
+        def __init__(self, *a, **k):
+            pass
+
+        def grab(self):
+            img = np.full((90, 160, 3), 40, np.uint8)
+            img[:12, :] = (120, 60, 200)  # purple-ish top bar, like a themed title bar
+            return img
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(screen, "Capture", FakeCap)
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "c.json")
+    out = tmp_path / "s.png"
+    assert cli.main(["snapshot", "--out", str(out)]) == 0
+    txt = capsys.readouterr().out
+    assert out.exists() and "top" in txt and "left" in txt

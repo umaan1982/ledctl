@@ -119,6 +119,57 @@ def cmd_effect(args, cfg):
     s.close()
 
 
+def cmd_snapshot(args, cfg):
+    """Show what sync sees: per-side colours sent to the strip + an annotated PNG. No USB needed."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+    from .screen import Capture, Processor, Sampler
+    n = args.leds or 80
+    lay = make_layout(cfg, n)
+    sampler = Sampler(lay, cfg["depth"])
+    cap = Capture(cfg["monitor"], backend=cfg["backend"])
+    img = None
+    for _ in range(20):  # dxcam may need a moment for its first frame
+        img = cap.grab()
+        if img is not None:
+            break
+        time.sleep(0.05)
+    cap.close()
+    if img is None:
+        print("Couldn't capture the screen.")
+        return
+    raw = sampler.sample(img)
+    sent = Processor(smoothing=0, saturation=cfg["saturation"], gamma=cfg["gamma"])(raw.copy())
+    leds = lay.leds()
+    print(f"Capture: {cap.backend}, {img.shape[1]}x{img.shape[0]} thumbnail, depth {cfg['depth']:.0%}, "
+          f"layout L{lay.left} T{lay.top} R{lay.right} B{lay.bottom}")
+    print(f"{'side':6} {'screen avg':12} {'sent to LEDs':12}")
+    for side in ("left", "top", "right", "bottom"):
+        idx = [i for i, (sd, _, _) in enumerate(leds) if sd == side]
+        if not idx:
+            continue
+        a = raw[idx].mean(axis=0).astype(int)
+        b = sent[idx].mean(axis=0).astype(int)
+        print(f"{side:6} #{a[0]:02X}{a[1]:02X}{a[2]:02X}      #{b[0]:02X}{b[1]:02X}{b[2]:02X}")
+    # annotated picture: screen thumbnail with sampled zones + the LED colours underneath
+    h, w = img.shape[:2]
+    scale = max(1, 960 // w)
+    pic = Image.fromarray(np.ascontiguousarray(img)).resize((w * scale, h * scale), Image.NEAREST)
+    out = Image.new("RGB", (pic.width, pic.height + 40), (0, 0, 0))
+    out.paste(pic, (0, 0))
+    d = ImageDraw.Draw(out)
+    dy, dx = int(h * cfg["depth"]) * scale, int(w * cfg["depth"]) * scale
+    d.rectangle((0, 0, dx, pic.height - 1), outline=(255, 0, 0), width=2)
+    d.rectangle((0, 0, pic.width - 1, dy), outline=(0, 255, 0), width=2)
+    d.rectangle((pic.width - dx, 0, pic.width - 1, pic.height - 1), outline=(0, 128, 255), width=2)
+    bw = out.width / len(sent)
+    for i, c in enumerate(sent.astype(int)):
+        d.rectangle((int(i * bw), pic.height + 4, int((i + 1) * bw), pic.height + 36), fill=tuple(c))
+    path = Path(args.out).resolve()
+    out.save(path)
+    print(f"Saved {path}  (red/green/blue boxes = left/top/right zones; bar = LED colours, LED 1 on the left)")
+
+
 def cmd_calibrate(args, cfg):
     s = open_strip(args)
     n = s.led_count or 54
@@ -270,6 +321,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--speed", type=int, help="0-100")
     e.set_defaults(fn=cmd_effect)
     sub.add_parser("calibrate", help="colour each side to check layout").set_defaults(fn=cmd_calibrate)
+    sn = sub.add_parser("snapshot", help="show what screen sync sees (no USB needed)")
+    sn.add_argument("--out", default="ledctl-snapshot.png")
+    sn.set_defaults(fn=cmd_snapshot)
 
     cf = sub.add_parser("config", help="save settings")
     cf.add_argument("--layout", type=int, nargs="+", metavar="N", help="LEDs per side: L T R [B]")

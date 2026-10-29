@@ -33,6 +33,7 @@ Device Manager → Human Interface Devices → Properties → Details → **Hard
 | Brightness | `ledctl brightness 120` (1-255) |
 | Screen sync in this console | `ledctl sync` (Ctrl+C returns to your colour) |
 | Show CPU use and fps | `ledctl sync --stats` |
+| See what sync sees (colours per side + picture) | `ledctl snapshot` |
 | Firmware effects | `ledctl effect --type dynamic --index 3 --speed 70` |
 | Music via the strip's microphone | `ledctl effect --type music --index 0` |
 | Off | `ledctl off` |
