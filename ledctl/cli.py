@@ -18,7 +18,8 @@ from .device import DeviceError, Strip, list_interfaces
 CONFIG = Path(os.environ.get("APPDATA", Path.home() / ".config")) / "ledctl" / "config.json"
 DEFAULTS = {"layout": None, "reverse": False, "mode": "chunked", "max_reports": 0,
             "fps": 30, "smoothing": 0.5, "saturation": 1.3, "gamma": 1.0, "depth": 0.12,
-            "monitor": 1, "brightness": 255, "backend": "auto", "color": [128, 0, 255]}
+            "monitor": 1, "brightness": 255, "backend": "auto", "color": [128, 0, 255],
+            "off_with_display": True}
 
 
 def load_config() -> dict:
@@ -214,6 +215,8 @@ def cmd_config(args, cfg):
             cfg[k] = v
     if args.reverse is not None:
         cfg["reverse"] = args.reverse == "on"
+    if args.off_with_display is not None:
+        cfg["off_with_display"] = args.off_with_display == "on"
     save_config(cfg)
     print(f"{CONFIG}\n{json.dumps(cfg, indent=2)}")
 
@@ -382,6 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--depth", type=float)
     cf.add_argument("--monitor", type=int)
     cf.add_argument("--backend", choices=("auto", "dxcam", "mss"))
+    cf.add_argument("--off-with-display", choices=("on", "off"),
+                    help="tray: lights off when the screen turns off (default on)")
     cf.set_defaults(fn=cmd_config)
 
     sy = sub.add_parser("sync", help="screen sync (ambilight)")

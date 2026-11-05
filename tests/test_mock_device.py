@@ -328,3 +328,52 @@ def test_sync_survives_capture_failure(fake, monkeypatch):
     t.join(3)
     assert calls["open"] >= 3 and calls["grab"] > 5
     assert sum(1 for f in frames(fake) if f[:2] == b"SC") > 3
+
+
+def _controller(monkeypatch, tmp_path, devs):
+    """TrayController with a sequence of fake devices (a new one each time the strip is reopened)."""
+    from ledctl import cli
+    from ledctl.tray import TrayController
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "c.json")
+    it = iter(devs)
+    current = {}
+
+    def opener(args):
+        dev = next(it)
+        current["dev"] = dev
+        _install(monkeypatch, dev)
+        return cli.open_strip(args)
+
+    def fake_sync(args, cfg, stop, strip):
+        while not stop.is_set():
+            strip.frame([(1, 2, 3)] * 80)
+            stop.wait(0.01)
+
+    ctl = TrayController(cli.build_parser().parse_args(["tray"]), cli.load_config(), opener=opener,
+                         sync_fn=fake_sync, log=lambda *_: None)
+    return ctl, current
+
+
+def test_tray_power_down_and_wake_resume_sync(monkeypatch, tmp_path):
+    import time as _t
+    d1, d2 = FakeDev(), FakeDev()
+    ctl, cur = _controller(monkeypatch, tmp_path, [d1, d2])
+    ctl.start_sync()
+    _t.sleep(0.05)
+    ctl.power_down("sleep")
+    assert not ctl.syncing and frames(d1)[-1][4] == 0x97  # last thing sent: OFF
+    ctl.power_up("wake")
+    _t.sleep(0.05)
+    assert ctl.syncing and cur["dev"] is d2                 # reconnected and syncing again
+    assert any(f[:2] == b"SC" for f in frames(d2))
+    ctl.stop_sync()
+
+
+def test_tray_shutdown_from_static_colour_restores_colour(monkeypatch, tmp_path):
+    d1 = FakeDev()
+    ctl, _ = _controller(monkeypatch, tmp_path, [d1])
+    ctl.set_color((10, 20, 30))
+    ctl.power_down("display off")
+    assert frames(d1)[-1][4] == 0x97
+    ctl.power_up("display on")
+    assert frames(d1)[-1][4] == 0x86 and frames(d1)[-1][5:9] == bytes([1, 10, 20, 30])
