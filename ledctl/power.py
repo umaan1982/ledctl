@@ -138,9 +138,22 @@ class PowerWatcher:
         user32.PostQuitMessage.argtypes = (ctypes.c_int,)
         kernel32.GetModuleHandleW.argtypes = (W.LPCWSTR,)
         kernel32.GetModuleHandleW.restype = W.HMODULE
+        user32.ShutdownBlockReasonCreate.argtypes = (W.HWND, W.LPCWSTR)
+        user32.ShutdownBlockReasonDestroy.argtypes = (W.HWND,)
+        # Ask to be told about shutdown first (highest app level) so the strip goes off early.
+        kernel32.SetProcessShutdownParameters(0x3FF, 0)
 
         def wndproc(hwnd, msg, wparam, lparam):
             try:
+                if msg in (WM_QUERYENDSESSION, WM_ENDSESSION):
+                    self.dispatcher.log(f"Session end message 0x{msg:04X} wParam={wparam} lParam=0x{lparam or 0:X}")
+                if msg == WM_QUERYENDSESSION:
+                    # Shown in Windows' "apps are preventing shutdown" list only if we're slow.
+                    user32.ShutdownBlockReasonCreate(hwnd, "Switching off the LED strip")
+                    try:
+                        return self.dispatcher.handle(msg, wparam) or 1
+                    finally:
+                        user32.ShutdownBlockReasonDestroy(hwnd)
                 display_state = None
                 if msg == WM_POWERBROADCAST and wparam == PBT_POWERSETTINGCHANGE and lparam:
                     s = ctypes.cast(lparam, ctypes.POINTER(POWERBROADCAST_SETTING)).contents

@@ -29,6 +29,7 @@ Device Manager → Human Interface Devices → Properties → Details → **Hard
 | Tray icon, no console window, sync on | double-click `start-tray.bat` |
 | Start automatically at Windows login | `ledctl autostart sync` (or `color` for your saved colour) |
 | Turn autostart off | `ledctl autostart off` |
+| Lights off at shutdown (installed by autostart) | `ledctl shutdown-hook on` |
 | Fixed colour (saved as your default) | `ledctl color #8000FF` |
 | Brightness | `ledctl brightness 120` (1-255) |
 | Screen sync in this console | `ledctl sync` (Ctrl+C returns to your colour) |
@@ -40,9 +41,11 @@ Device Manager → Human Interface Devices → Properties → Details → **Hard
 
 The tray menu has screen sync on/off, colour presets, brightness, Off and Quit.
 
-**Lights off with the PC:** while the tray app runs, the strip switches off when Windows shuts down,
-signs out, sleeps or turns the display off, and comes back (sync or your colour) when you return.
-This matters on laptops that keep USB powered while off and charging. To keep the lights on when only
+**Lights off with the PC:** while the tray app runs, the strip switches off when Windows sleeps or
+turns the display off, and comes back (sync or your colour) when you return. For shutdown and restart,
+`ledctl autostart …` also installs a small Task Scheduler task (`ledctl shutdown-hook on|off|status`)
+that sends "off" as soon as Windows starts shutting down. That's needed because Windows doesn't reliably
+warn hidden background apps. This matters on laptops that keep USB powered while off and charging. To keep the lights on when only
 the display turns off, run `ledctl config --off-with-display off`.
 Only one copy can run sync or the tray at a time; a second copy refuses to start and tells you why.
 ledctl also warns you if the DX Light / SyncLight app is running, because both would fight over the lights.

@@ -123,7 +123,9 @@ def cmd_brightness(args, cfg):
 
 
 def cmd_off(args, cfg):
-    s = open_strip(args)
+    # No handshake: this also runs from the shutdown hook, where every millisecond counts.
+    log = (lambda f: print("TX", f.hex(" "))) if args.verbose or args.dry_run else None
+    s = Strip(dry_run=args.dry_run, log=log)
     s.off()
     s.close()
 
@@ -306,6 +308,79 @@ def cmd_sync(args, cfg):
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+TASK_NAME = r"ledctl\lights-off-at-shutdown"
+
+
+def shutdown_task_xml(pythonw: str, workdir: str) -> str:
+    """Task Scheduler task that runs `ledctl off` when Windows logs a user-initiated
+    shutdown/restart (System log, User32, event 1074), which happens before apps close."""
+    from xml.sax.saxutils import escape
+    query = ("<QueryList><Query Id=\"0\" Path=\"System\"><Select Path=\"System\">"
+             "*[System[Provider[@Name='User32'] and EventID=1074]]</Select></Query></QueryList>")
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>ledctl: switch the LED strip off when Windows shuts down</Description></RegistrationInfo>
+  <Triggers>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>{escape(query)}</Subscription>
+    </EventTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(pythonw)}</Command>
+      <Arguments>-m ledctl off</Arguments>
+      <WorkingDirectory>{escape(workdir)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def shutdown_hook(on: bool) -> str:
+    import subprocess
+    import tempfile
+    if sys.platform != "win32":
+        return "The shutdown hook is Windows-only."
+    if not on:
+        r = subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], capture_output=True, text=True)
+        return "Shutdown hook removed." if r.returncode == 0 else "Shutdown hook wasn't installed."
+    root = Path(__file__).resolve().parents[1]
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    xml = shutdown_task_xml(str(pythonw), str(root))
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, encoding="utf-16") as f:
+        f.write(xml)
+    try:
+        r = subprocess.run(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", f.name, "/F"],
+                           capture_output=True, text=True)
+    finally:
+        os.unlink(f.name)
+    if r.returncode != 0:
+        return f"Couldn't create the shutdown hook: {(r.stderr or r.stdout).strip()}"
+    return "Shutdown hook on: lights switch off as soon as Windows starts shutting down or restarting."
+
+
+def cmd_shutdown_hook(args, cfg):
+    if args.what == "status":
+        import subprocess
+        r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True, text=True) \
+            if sys.platform == "win32" else None
+        print("Shutdown hook is on." if r and r.returncode == 0 else "Shutdown hook is off.")
+        return
+    print(shutdown_hook(args.what == "on"))
 
 
 def cmd_autostart(args, cfg):
@@ -324,6 +399,7 @@ def cmd_autostart(args, cfg):
             except FileNotFoundError:
                 pass
             print("Autostart removed.")
+            print(shutdown_hook(False))
             return
         if args.what == "status":
             try:
@@ -335,6 +411,7 @@ def cmd_autostart(args, cfg):
         cmd = f'"{pythonw}" "{launcher}"' + (" --sync" if args.what == "sync" else "")
         winreg.SetValueEx(k, "ledctl", 0, winreg.REG_SZ, cmd)
         print(f"Autostart on ({'tray + screen sync' if args.what == 'sync' else 'tray + your saved colour'}).")
+        print(shutdown_hook(True))
         print("Remove with: ledctl autostart off")
 
 
@@ -404,6 +481,9 @@ def build_parser() -> argparse.ArgumentParser:
     au = sub.add_parser("autostart", help="start the tray app at Windows login")
     au.add_argument("what", choices=("sync", "color", "off", "status"))
     au.set_defaults(fn=cmd_autostart)
+    sh = sub.add_parser("shutdown-hook", help="switch the lights off when Windows shuts down")
+    sh.add_argument("what", choices=("on", "off", "status"))
+    sh.set_defaults(fn=cmd_shutdown_hook)
     return p
 
 
@@ -426,7 +506,7 @@ def preflight(args) -> bool:
     """Single-instance lock for sync/tray, warnings for everything else."""
     if args.cmd not in STRIP_CMDS or args.dry_run:
         return True
-    vendor = instance.vendor_running()
+    vendor = None if args.cmd == "off" else instance.vendor_running()
     if vendor:
         msg = (f"Warning: {vendor} (the vendor app) is running and will fight ledctl over the lights. "
                "Close it, and disable it in Task Manager -> Startup apps.")

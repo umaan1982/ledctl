@@ -73,8 +73,8 @@ def test_brightness_resends_colour(fake):
 
 def test_keep_keyboard(fake):
     from ledctl.cli import main
-    main(["--keep-keyboard", "off"])
-    assert [f[4] for f in frames(fake)] == [0x82, 0x97]
+    main(["off"])  # off is a single packet: no handshake (it runs at shutdown)
+    assert [f[4] for f in frames(fake)] == [0x97]
 
 
 def test_sync_loop(fake, monkeypatch):
@@ -370,10 +370,45 @@ def test_tray_power_down_and_wake_resume_sync(monkeypatch, tmp_path):
 
 
 def test_tray_shutdown_from_static_colour_restores_colour(monkeypatch, tmp_path):
-    d1 = FakeDev()
-    ctl, _ = _controller(monkeypatch, tmp_path, [d1])
+    d1, d2 = FakeDev(), FakeDev()
+    ctl, _ = _controller(monkeypatch, tmp_path, [d1, d2])
     ctl.set_color((10, 20, 30))
     ctl.power_down("display off")
     assert frames(d1)[-1][4] == 0x97
     ctl.power_up("display on")
-    assert frames(d1)[-1][4] == 0x86 and frames(d1)[-1][5:9] == bytes([1, 10, 20, 30])
+    assert frames(d2)[-1][4] == 0x86 and frames(d2)[-1][5:9] == bytes([1, 10, 20, 30])
+
+
+class DyingDev(FakeDev):
+    """Works for a few writes, then the USB device disappears (modern standby)."""
+
+    def __init__(self, ok_writes):
+        super().__init__()
+        self.ok = ok_writes
+
+    def write(self, rep):
+        if len(self.writes) >= self.ok:
+            return -1
+        return super().write(rep)
+
+
+def test_tray_sync_reconnects_when_strip_drops(monkeypatch, tmp_path):
+    import time as _t
+    d1, d2 = DyingDev(8), FakeDev()
+    ctl, cur = _controller(monkeypatch, tmp_path, [d1, d2])
+    ctl.start_sync()
+    _t.sleep(1.4)
+    assert cur["dev"] is d2 and ctl.syncing
+    assert any(f[:2] == b"SC" for f in frames(d2))
+    ctl.stop_sync()
+
+
+def test_shutdown_task_xml():
+    import xml.dom.minidom
+    from ledctl.cli import shutdown_task_xml
+    x = shutdown_task_xml(r"C:\Users\A B\ledctl\.venv\Scripts\pythonw.exe", r"C:\Users\A B\ledctl")
+    doc = xml.dom.minidom.parseString(x.replace('encoding="UTF-16"', ""))
+    sub = doc.getElementsByTagName("Subscription")[0].firstChild.data
+    assert "EventID=1074" in sub and "User32" in sub
+    assert doc.getElementsByTagName("Arguments")[0].firstChild.data == "-m ledctl off"
+    assert doc.getElementsByTagName("Command")[0].firstChild.data.endswith("pythonw.exe")

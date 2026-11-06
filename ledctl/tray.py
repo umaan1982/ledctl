@@ -33,10 +33,30 @@ class TrayController:
             if self.thread:
                 return
             self.stop_ev = threading.Event()
-            self.thread = threading.Thread(target=self.sync_fn,
-                                           args=(self.args, self.cfg, self.stop_ev, self.strip),
-                                           daemon=True)
+            self.thread = threading.Thread(target=self._sync_runner, args=(self.stop_ev,), daemon=True)
             self.thread.start()
+
+    def _sync_runner(self, stop: threading.Event) -> None:
+        """Run sync; if the strip drops off USB (e.g. after modern standby), reconnect and carry on."""
+        while not stop.is_set():
+            try:
+                self.sync_fn(self.args, self.cfg, stop, self.strip)
+                return
+            except (DeviceError, OSError) as e:
+                self.log(f"Strip connection lost ({e}); reconnecting")
+                if stop.wait(1):
+                    return
+                try:
+                    self._reopen()
+                except (DeviceError, OSError) as e2:
+                    self.log(f"Reconnect failed ({e2}); retrying")
+
+    def _reopen(self) -> None:
+        try:
+            self.strip.close()
+        except Exception:
+            pass
+        self.strip = self.opener(self.args)
 
     def stop_sync(self, timeout: float = 2.0) -> None:
         with self.lock:
@@ -94,12 +114,8 @@ class TrayController:
             # After sleep the USB device may have been re-enumerated: reconnect.
             for attempt in range(10):
                 try:
-                    if attempt or reason == "wake":
-                        try:
-                            self.strip.close()
-                        except Exception:
-                            pass
-                        self.strip = self.opener(self.args)
+                    # Always reconnect: after sleep / modern standby the USB device may be new.
+                    self._reopen()
                     if self.resume_sync:
                         self.start_sync()
                     else:
